@@ -1,5 +1,21 @@
 version: '3.0'
 services:
+  # New relic agent
+  agent:
+    container_name: newrelic-infra-atomic-telostest
+    image: newrelic/infrastructure:latest
+    cap_add:
+      - SYS_PTRACE
+    network_mode: host
+    pid: host
+    privileged: true
+    volumes:
+      - "/:/host:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    environment:
+      NRIA_LICENSE_KEY: ${NEW_RELIC_LICENSE_KEY}
+    restart: unless-stopped
+
   eosio-contract-api-filler:
     container_name: eosio-contract-api-filler
     build: .
@@ -26,6 +42,10 @@ services:
       - ./config:/home/application/app/config
     networks:
       - eosio-contract-api
+    environment:
+      - NEW_RELIC_APP_NAME=atomic-telostest-server
+    env_file:
+      - .env
   eosio-contract-api-redis:
     container_name: eosio-contract-api-redis
     image: redis:5-alpine
