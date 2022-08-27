@@ -1,54 +1,5 @@
 version: '3.0'
 services:
-  # New relic agent
-  agent:
-    container_name: newrelic-infra-atomic-telostest
-    image: newrelic/infrastructure:latest
-    cap_add:
-      - SYS_PTRACE
-    network_mode: host
-    pid: host
-    privileged: true
-    volumes:
-      - "/:/host:ro"
-      - "/var/run/docker.sock:/var/run/docker.sock"
-    environment:
-      NRIA_LICENSE_KEY: ${NEW_RELIC_LICENSE_KEY}
-    restart: unless-stopped
-  
-  nginx:
-    container_name: nginx
-    image: nginxproxy/nginx-proxy
-    restart: unless-stopped
-    ports:
-      - 80:80
-      - 443:443
-    volumes:
-      - /var/run/docker.sock:/tmp/docker.sock:ro
-      - /var/docker/nginx/html:/usr/share/nginx/html
-      - /var/docker/nginx/certs:/etc/nginx/certs
-      - /var/docker/nginx/vhost:/etc/nginx/vhost.d
-    logging:
-      options:
-        max-size: "10m"
-        max-file: "3"
-    networks:
-      - eosio-contract-api
-
-  letsencrypt-companion:
-    container_name: letsencrypt-companion
-    image: nginxproxy/acme-companion
-    restart: unless-stopped
-    volumes_from:
-      - nginx
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/docker/nginx/acme:/etc/acme.sh
-    environment:
-      DEFAULT_EMAIL: dev@y-knot.io
-    networks:
-      - eosio-contract-api
-
   eosio-contract-api-filler:
     container_name: eosio-contract-api-filler
     build: .
@@ -66,8 +17,8 @@ services:
     build: .
     command: yarn run start:server
     restart: on-failure
-    expose:
-      - 9000
+    ports:
+      - "9000:9000"
     depends_on:
       - eosio-contract-api-postgres
       - eosio-contract-api-redis
@@ -75,18 +26,12 @@ services:
       - ./config:/home/application/app/config
     networks:
       - eosio-contract-api
-    environment:
-      NEW_RELIC_APP_NAME: atomic-telostest-server
-      VIRTUAL_HOST: atomic-telostest.y-knot.io
-      LETSENCRYPT_HOST: atomic-telostest.y-knot.io
-    env_file:
-      - .env
   eosio-contract-api-redis:
     container_name: eosio-contract-api-redis
     image: redis:5-alpine
     restart: on-failure
-    # ports:
-    #   - "6379:6379"
+    ports:
+      - "6379:6379"
     volumes:
       - ./docker/redis/data:/data
     networks:
@@ -98,9 +43,9 @@ services:
     shm_size: '8gb'
     environment:
       - 'POSTGRES_USER=root'
-      - 'POSTGRES_PASSWORD=FlyYouFools!'
-    # ports:
-    #   - "5432:5432"
+      - 'POSTGRES_PASSWORD=changme'
+    ports:
+      - "5432:5432"
     volumes:
       - ./docker/postgres/data:/var/lib/postgresql/data
     networks:
