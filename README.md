@@ -1,7 +1,7 @@
 # EOSIO Contract API
 
 The aim of this project is to provide a framework to fill and query state and history for specific
-contracts on eosio based blockchains. 
+contracts on eosio based blockchains.
 
 This project uses the eosio State History Plugin as data source and PostgreSQL to store / query the data.
 Per block transactions guarantee that the database is consistent at any time.
@@ -12,20 +12,24 @@ Per block transactions guarantee that the database is consistent at any time.
 * PostgreSQL >= 13.0
   * You need to enable the `pg_trgm` extension with `CREATE EXTENSION pg_trgm;`
 * Redis >= 5.0
-* Nodeos >= 1.8.0 (only tested with 2.0 and 2.1) The state history plugin needs to be enabled and the options: 
+* Nodeos >= 1.8.0 (only tested with 2.0 and 2.1) The state history plugin needs to be enabled and the options:
 `trace-history = true`, `chain-state-history = true`
 
 Suggestions
+
 * Hasura GraphQL Engine >= 1.3 (if you want to allow GraphQL queries)
 * PGAdmin 4 (Interface to manage the postgres database)
 
 ## Configuration
+
 The config folder contains 3 different configuration files
 
 #### connections.config.json
+
 This file contains Postgres / Redis / Nodeos connection data for the used chain.
 
 Notes
+
 * Redis: Can be used for multiple chains without further action
 * PostgreSQL: Each chain needs it own postgres database (can use the same postgres instance), but multiple readers of the same
 chain can use the same database if they are non conflicting
@@ -54,9 +58,11 @@ chain can use the same database if they are non conflicting
 ```
 
 #### readers.config.json
+
 This file is used to configure the filler
 
 For atomicassets / atomicmarket you should specify the following start blocks
+
 * `wax-mainnet`: `64000000`
 * `wax-testnet`: `35795000` (Here you need to use it otherwise it will break)
 * `eos-mainnet`: `99070000`
@@ -138,21 +144,23 @@ For atomicassets / atomicmarket you should specify the following start blocks
 ## Installation
 
 This project consists of two separated processes which need to be started and stopped independently:
+
 * The API which will provide the socket and REST endpoints (or whatever is used)
 * The filler which will read the data from the blockchain and fills the database
 
 The filler needs to be started before the API when running it for the first time:
 
 Prerequisites:
-- PostgreSQL
-  - Create a database and user which is allowed to read and write on that db
-    
-- EOSIO node 
-  - State History Plugin enabled with options `trace-history = true`, `chain-state-history = true`
-  - Fully synced for the block range you want to process
-  - Open socket and http api
 
-- Copy and modify example configs with the correct connection params
+* PostgreSQL
+  * Create a database and user which is allowed to read and write on that db
+
+* EOSIO node
+  * State History Plugin enabled with options `trace-history = true`, `chain-state-history = true`
+  * Fully synced for the block range you want to process
+  * Open socket and http api
+
+* Copy and modify example configs with the correct connection params
 
 There are two suggested ways to run the project: Docker if you want to containerize the application or PM2 if you want to run it on system level
 
@@ -163,10 +171,12 @@ There are two suggested ways to run the project: Docker if you want to container
 3. `docker-compose up -d`
 
 Start
+
 * `docker-compose start eosio-contract-api-filler`
 * `docker-compose start eosio-contract-api-server`
 
 Stop
+
 * `docker-compose stop eosio-contract-api-filler`
 * `docker-compose stop eosio-contract-api-server`
 
@@ -177,10 +187,12 @@ Stop
 3. `yarn global add pm2`
 
 Start
+
 * `pm2 start ecosystems.config.json --only eosio-contract-api-filler`
 * `pm2 start ecosystems.config.json --only eosio-contract-api-server`
 
 Stop
+
 * `pm2 stop eosio-contract-api-filler`
 * `pm2 stop eosio-contract-api-server`
 
@@ -204,6 +216,7 @@ Readers are used to fill the database for a specific contract.
 ```
 
 #### atomicmarket
+
 This reader requires a atomicassets and a delphioracle reader with the same contract as specified here
 
 ```json5
@@ -255,13 +268,14 @@ A namespace provides an API for a specific contract or use case and is based on 
   }
 }
 ```
+
 ## Testing
 
 To run the test on this project:
 
 1. In the `config` folder, copy the `example-*` files and rename them to `connections.config.json`
 `readers.config.json` and `server.config.json`
-2. Start the redis and postgresql servers, you can do that by using 
+2. Start the redis and postgresql servers, you can do that by using
 docker compose (`docker compose up eosio-contract-api-redis eosio-contract-api-postgres`)
 or installing them directly into your computer.
 3. Modify the `connection.config.json` to point to your local computer and have the correct credentials.
@@ -277,3 +291,6 @@ or installing them directly into your computer.
 5. Create a PR and fix the comments of the reviewer.
 6. Merge and deploy.
 
+### Running in production
+
+`docker-compose -f docker-compose.prod.yml up -d`
