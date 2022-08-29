@@ -3,7 +3,7 @@
   "provider_url": "https://pink.gg",
 
   "server_addr": "0.0.0.0",
-  "server_name": "wax.api.atomicassets.io",
+  "server_name": "localhost:9000",
   "server_port": 9000,
 
   "cache_life": 2,
@@ -43,42 +43,6 @@
           "schemas": 100,
           "templates": 1000,
           "transfers": 100,
-          "logs": 100
-        }
-      }
-    },
-    {
-      "name": "atomicmarket",
-      "path": "/atomicmarket",
-      "args": {
-        "atomicmarket_account": "atomicmarket",
-        "connected_reader": "atomic-1",
-        "socket_features": {
-          "asset_update": false
-        },
-        "api_features": {
-          "disable_v1_sales": true
-        },
-        "limits": {
-          "auctions": 100,
-          "buyoffers": 100,
-          "prices_templates": 1000,
-          "sales": 100,
-          "sales_templates": 100,
-          "sales_v2": 100,
-          "logs": 100
-        }
-      }
-    },
-    {
-      "name": "atomictools",
-      "path": "/atomictools",
-      "args": {
-        "atomictools_account": "atomictoolsx",
-        "atomicassets_account": "atomicassets",
-        "connected_reader": "atomic-1",
-        "limits": {
-          "links": 100,
           "logs": 100
         }
       }
