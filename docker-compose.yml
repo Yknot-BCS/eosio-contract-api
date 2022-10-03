@@ -47,7 +47,6 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./docker/postgres/data:/var/lib/postgresql/data
       - ./scripts:/docker-entrypoint-initdb.d
     networks:
       - eosio-contract-api
