@@ -14,5 +14,4 @@ config/connections.config.json
 config/readers.config.json
 config/server.config.json
 
-# new relic
-.env
+backups
