@@ -13,7 +13,7 @@
   "chain": {
     "name": "local-testnet",
     "chain_id": "8a34ec7df1b8cd06ff4a8abbaa7cc50300823350cadc59ab296cb00d104d2b8f",
-    "http": "http://fuelswitch_chain:8888",
-    "ship": "ws://fuelswitch_chain:8080"
+    "http": "http://chain:8888",
+    "ship": "ws://chain:8080"
   }
 }
