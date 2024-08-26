@@ -15,3 +15,5 @@ config/readers.config.json
 config/server.config.json
 
 backups
+
+.env
