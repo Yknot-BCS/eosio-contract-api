@@ -175,7 +175,8 @@ export const atomicassetsComponents = {
                     created_at_block: {type: 'string'},
                     created_at_time: {type: 'string'}
                 }
-            }
+            },
+            assets: {type: 'integer'},
         }
     },
     'Template': {
@@ -330,6 +331,27 @@ export const extendedAssetFilterParameters = [
         required: false,
         schema: {type: 'boolean'}
     },
+    {
+        name: 'minter',
+        in: 'query',
+        description: 'Filter by account that minted the asset',
+        required: false,
+        schema: {type: 'string'}
+    },
+    {
+        name: 'burner',
+        in: 'query',
+        description: 'Filter by account that burned the asset',
+        required: false,
+        schema: {type: 'string'}
+    },
+    {
+        name: 'initial_receiver',
+        in: 'query',
+        description: 'Filter by account that the asset was minted to',
+        required: false,
+        schema: {type: 'string'}
+    },
     ...greylistFilterParameters
 ];
 
@@ -393,6 +415,15 @@ export const completeAssetFilterParameters = [
         name: 'has_backed_tokens',
         in: 'query',
         description: 'Show only assets that are backed by a token',
+        required: false,
+        schema: {
+            type: 'boolean'
+        }
+    },
+    {
+        name: 'has_template_buyoffer',
+        in: 'query',
+        description: 'Show only assets that have a listed template buyoffer',
         required: false,
         schema: {
             type: 'boolean'

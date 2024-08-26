@@ -105,6 +105,12 @@ export default class AtomicAssetsHandler extends ContractHandler {
             await client.query('DROP VIEW IF EXISTS atomicassets_asset_mints_master CASCADE;');
             await client.query(fs.readFileSync('./definitions/views/atomicassets_asset_mints_master.sql', {encoding: 'utf8'}));
         }
+
+        if (version === '1.3.20') {
+            await client.query(fs.readFileSync('./definitions/views/atomicassets_schemas_master.sql', {encoding: 'utf8'}));
+            await client.query(fs.readFileSync('./definitions/views/atomicassets_templates_master.sql', {encoding: 'utf8'}));
+            await client.query(fs.readFileSync('./definitions/views/atomicassets_assets_master.sql', {encoding: 'utf8'}));
+        }
     }
 
     constructor(filler: Filler, args: {[key: string]: any}) {
@@ -247,25 +253,28 @@ export default class AtomicAssetsHandler extends ContractHandler {
             destructors.push(logProcessor(this, processor));
         }
 
-        this.filler.jobs.add('update atomicassets_template_counts', 60 * 10 * 1000, JobQueuePriority.LOW, async () => {
+        this.filler.jobs.add('aggregate atomicassets_asset_counts', 60 * 10, JobQueuePriority.LOW, async () => {
             await this.connection.database.query(
-                'WITH del AS ( ' +
-                    'DELETE FROM atomicassets_template_counts ' +
-                    'WHERE (contract, template_id) IN ( ' +
-                        'SELECT contract, template_id FROM atomicassets_template_counts WHERE dirty AND contract = $1 ' +
-                    ') ' +
-                    'RETURNING contract, template_id, assets, burned, owned ' +
-                ') ' +
-                'INSERT INTO atomicassets_template_counts(contract, template_id, assets, burned, owned, dirty) ' +
-                    'SELECT contract, template_id, COALESCE(SUM(assets)::INT, 0), COALESCE(SUM(burned)::INT, 0), COALESCE(SUM(owned)::INT, 0), NULL ' +
-                    'FROM del ' +
-                    'GROUP BY contract, template_id ' +
-                    'HAVING COALESCE(SUM(assets)::INT, 0) != 0;',
+                `
+                WITH del AS (
+                    DELETE FROM atomicassets_asset_counts
+                    WHERE (contract, collection_name, schema_name, template_id) IN (
+                        SELECT contract, collection_name, schema_name,template_id FROM atomicassets_asset_counts WHERE dirty AND contract = $1
+                    )
+                    RETURNING contract, collection_name, schema_name, template_id, assets, burned, owned
+                )
+                    INSERT INTO atomicassets_asset_counts(contract, collection_name, schema_name, template_id, assets, burned, owned, dirty)
+                        SELECT contract, collection_name, schema_name, template_id,
+                            COALESCE(SUM(assets)::INT, 0), COALESCE(SUM(burned)::INT, 0), COALESCE(SUM(owned)::INT, 0), NULL
+                        FROM del
+                        GROUP BY contract, collection_name, schema_name, template_id 
+                        HAVING COALESCE(SUM(assets)::INT, 0) != 0
+                `,
                 [this.args.atomicassets_account]
             );
         });
 
-        this.filler.jobs.add('update_atomicassets_mints', 30_000, JobQueuePriority.MEDIUM, async () => {
+        this.filler.jobs.add('update_atomicassets_mints', 30, JobQueuePriority.MEDIUM, async () => {
             await this.connection.database.query(
                 'CALL update_atomicassets_mints($1, $2)',
                 [this.args.atomicassets_account, this.filler.reader.lastIrreversibleBlock]

@@ -8,6 +8,7 @@ import {toInt} from '../../../../utils';
 import moize from 'moize';
 import {filterQueryArgs, FilterValues} from '../../validation';
 import {hasAssetFilter} from '../../atomicassets/utils';
+import {buildTemplateMintFilter} from '../utils';
 
 type SalesSearchOptions = {
     values: FilterValues;
@@ -17,9 +18,10 @@ type SalesSearchOptions = {
     saleStates: number[],
 }
 
+const LISTING_ORDER_MARKER = '/*listing_order_marker*/';
 export async function getSalesV2Action(params: RequestValues, ctx: AtomicMarketContext): Promise<any> {
     const maxLimit = ctx.coreArgs.limits?.sales_v2 || 100;
-    const args = filterQueryArgs(params, {
+    const args = await filterQueryArgs(params, {
         state: {type: 'string[]', min: 1},
 
         page: {type: 'int', min: 1, default: 1},
@@ -28,7 +30,7 @@ export async function getSalesV2Action(params: RequestValues, ctx: AtomicMarketC
             type: 'string',
             allowedValues: [
                 'created', 'updated', 'sale_id', 'price',
-                'template_mint'
+                'template_mint', 'name',
             ],
             default: 'created'
         },
@@ -37,9 +39,9 @@ export async function getSalesV2Action(params: RequestValues, ctx: AtomicMarketC
     });
 
     const query = new QueryBuilder(`
-                SELECT listing.sale_id
-                FROM atomicmarket_sales_filters listing
-            `);
+        SELECT listing.sale_id, listing.market_contract ${LISTING_ORDER_MARKER}
+        FROM atomicmarket_sales_filters listing
+    `);
 
     query.equal('listing.market_contract', ctx.coreArgs.atomicmarket_account);
 
@@ -53,7 +55,7 @@ export async function getSalesV2Action(params: RequestValues, ctx: AtomicMarketC
 
     await buildSaleFilterV2(search);
 
-    buildBoundaryFilter(
+    await buildBoundaryFilter(
         params, query, 'listing.sale_id', 'int',
         args.sort === 'updated' ? 'listing.updated_at_time' : 'listing.created_at_time'
     );
@@ -70,12 +72,13 @@ export async function getSalesV2Action(params: RequestValues, ctx: AtomicMarketC
         return countQuery.rows[0].counter;
     }
 
-    const sortMapping: { [key: string]: { column: string, numericIndex: boolean } } = {
+    const sortMapping: { [key: string]: { column: string, nullable?: boolean, numericIndex: boolean } } = {
         sale_id: {column: 'listing.sale_id', numericIndex: true},
         created: {column: 'listing.created_at_time', numericIndex: true},
         updated: {column: 'listing.updated_at_time', numericIndex: true},
-        price: {column: 'listing.price', numericIndex: false},
-        template_mint: {column: 'LOWER(listing.template_mint)', numericIndex: false}
+        price: {column: 'listing.price', numericIndex: true},
+        template_mint: {column: 'LOWER(listing.template_mint)', numericIndex: true},
+        name: {column: `SPLIT_PART(listing.asset_names, e'\\n', 1)`, nullable: true, numericIndex: false},
     };
 
     if (args.sort === 'template_mint') {
@@ -89,13 +92,42 @@ export async function getSalesV2Action(params: RequestValues, ctx: AtomicMarketC
         }
     }
 
-    const preventIndexUsage = search.strongFilters.length > 0;
+    const preventIndexUsage = search.strongFilters.length > 0 && sortMapping[args.sort].numericIndex;
 
-    query.append(`ORDER BY ${sortMapping[args.sort].column}${preventIndexUsage ? ' + 0' : ''} ${args.order}, listing.sale_id ASC`);
-    query.paginate(args.page, args.limit);
-    const saleIds = await ctx.db.query(query.buildString(), query.buildValues());
+    const orderBy = `ORDER BY ${sortMapping[args.sort].column}${preventIndexUsage ? ' + 0' : ''} ${args.order} ${sortMapping[args.sort].nullable ? 'NULLS LAST' : ''}, listing.sale_id`;
+    query.append(orderBy);
+
+    const stateRecheckQuery = addStateRecheck(query, search.saleStates, args.page, args.limit, orderBy);
+
+    const saleIds = await ctx.db.query(stateRecheckQuery.buildString(), stateRecheckQuery.buildValues());
 
     return await fillSalesIdRows(saleIds.rows, ctx);
+}
+
+function addStateRecheck(query: QueryBuilder, saleStates: number[], page: number, limit: number, orderBy: string): QueryBuilder {
+    if (!saleStates.length) {
+        query.paginate(page, limit);
+        return query;
+    }
+
+    query.append(`LIMIT ${Math.ceil(page * limit * 1.25)}`); // select more rows than requested in case the state doesn't match for some of them
+
+    const stateRecheckQuery = new QueryBuilder(`
+        WITH listings AS MATERIALIZED (
+            ${query.buildString().replace(LISTING_ORDER_MARKER, `, ROW_NUMBER() OVER(${orderBy}) listing_order`)}
+        )
+        
+        SELECT listings.sale_id
+        FROM listings
+            LEFT OUTER JOIN atomicmarket_sales sales ON listings.market_contract = sales.market_contract AND listings.sale_id = sales.sale_id
+            LEFT OUTER JOIN atomicassets_offers offer ON sales.assets_contract = offer.contract AND sales.offer_id = offer.offer_id
+        WHERE atomicmarket_get_sale_state(sales.state, offer.state) = ANY(${query.addVariable(saleStates)})
+        ORDER BY listing_order
+    `, query.buildValues());
+
+    stateRecheckQuery.paginate(page, limit);
+
+    return stateRecheckQuery;
 }
 
 async function fillSalesIdRows(rows: any[], ctx: AtomicMarketContext): Promise<any[]> {
@@ -119,7 +151,7 @@ export async function getSalesCountV2Action(params: RequestValues, ctx: AtomicMa
 
 async function buildSaleFilterV2(search: SalesSearchOptions): Promise<void> {
     const {values, query, ctx} = search;
-    const args = filterQueryArgs(values, {
+    const args = await filterQueryArgs(values, {
         max_assets: {type: 'int', min: 1},
         min_assets: {type: 'int', min: 1},
 
@@ -127,13 +159,23 @@ async function buildSaleFilterV2(search: SalesSearchOptions): Promise<void> {
         min_price: {type: 'float', min: 0},
         max_price: {type: 'float', min: 0},
 
-        template_blacklist: {type: 'int[]', min: 1},
+        template_blacklist: {type: 'list[id]'},
+
+        hide_templates_by_accounts: { type: 'list[name]' },
     });
 
     await buildMainFilterV2(search);
-    buildListingFilterV2(search);
+    await buildListingFilterV2(search);
 
-    buildAssetFilterV2(search);
+    await buildAssetFilterV2(search);
+
+    if (args.hide_templates_by_accounts.length) {
+        query.addCondition(`NOT EXISTS(
+            SELECT asset_id FROM atomicassets_assets asset
+            WHERE asset.contract = listing.assets_contract AND (array['t' || asset.template_id] && listing.filter)
+            AND (asset.owner = ANY(${query.addVariable(args.hide_templates_by_accounts)}))
+        )`);
+    }
 
     if (args.template_blacklist.length) {
         const ignore = args.template_blacklist.map((t: number) => `t${t}`);
@@ -173,19 +215,15 @@ async function buildSaleFilterV2(search: SalesSearchOptions): Promise<void> {
     }
 
     if (search.saleStates.length) {
-        query.appendToBase('JOIN atomicmarket_sales sales ON listing.market_contract = sales.market_contract AND listing.sale_id = sales.sale_id');
-        query.appendToBase('JOIN atomicassets_offers offer ON sales.assets_contract = offer.contract AND sales.offer_id = offer.offer_id');
-        query.addCondition(`atomicmarket_get_sale_state(sales.state, offer.state) = ANY(${query.addVariable(search.saleStates)})`);
-
         query.equalMany('listing.sale_state', search.saleStates);
     }
 }
 
-function buildAssetFilterV2(search: SalesSearchOptions): void {
+async function buildAssetFilterV2(search: SalesSearchOptions): Promise<void> {
     const {values, query} = search;
 
-    const args = filterQueryArgs(values, {
-        asset_id: {type: 'string[]', min: 1},
+    const args = await filterQueryArgs(values, {
+        asset_id: {type: 'list[id]'},
     });
 
     if (args.asset_id.length) {
@@ -197,7 +235,7 @@ function buildAssetFilterV2(search: SalesSearchOptions): void {
     for (const name of names) {
         query.addCondition(
             'listing.asset_names ILIKE ' +
-            query.addVariable('%' + name.replace('%', '\\%').replace('_', '\\_') + '%')
+            query.addVariable('%' + query.escapeLikeVariable(name) + '%')
         );
         // postgres makes the right decision on whether to use the asset_names index or the order index based
         // on how common the keyword is, so we don't force it to use the asset_names index here
@@ -222,23 +260,23 @@ const SALE_FILTER_FLAG_NOT_BURNABLE = 'nb';
 
 async function buildMainFilterV2(search: SalesSearchOptions): Promise<void> {
     const {values, query} = search;
-    const args = filterQueryArgs(values, {
-        seller_blacklist: {type: 'string[]', min: 1},
-        buyer_blacklist: {type: 'string[]', min: 1},
+    const args = await filterQueryArgs(values, {
+        seller_blacklist: {type: 'list[name]'},
+        buyer_blacklist: {type: 'list[name]'},
 
-        account: {type: 'string[]', min: 1},
-        seller: {type: 'string[]', min: 1},
-        buyer: {type: 'string[]', min: 1},
+        account: {type: 'list[name]'},
+        seller: {type: 'list[name]'},
+        buyer: {type: 'list[name]'},
 
-        collection_name: {type: 'string[]', min: 1},
-        collection_blacklist: {type: 'string[]', min: 1},
-        collection_whitelist: {type: 'string[]', min: 1},
+        collection_name: {type: 'list[name]'},
+        collection_blacklist: {type: 'list[name]'},
+        collection_whitelist: {type: 'list[name]'},
 
-        owner: {type: 'string[]', min: 1, max: 12},
+        owner: {type: 'list[name]'},
 
         burned: {type: 'bool'},
-        template_id: {type: 'string[]', min: 1},
-        schema_name: {type: 'string[]', min: 1},
+        template_id: {type: 'list[id]'},
+        schema_name: {type: 'list[name]'},
         is_transferable: {type: 'bool'},
         is_burnable: {type: 'bool'},
 
@@ -263,7 +301,7 @@ async function buildMainFilterV2(search: SalesSearchOptions): Promise<void> {
         flags: [],
     };
 
-    async function addIncArrayFilter(filter: string, canBeStrongFilter: boolean = false, value: any = undefined): Promise<void> {
+    async function addIncArrayFilter(filter: keyof typeof args, canBeStrongFilter: boolean = false, value: any = undefined): Promise<void> {
         value = value ?? args[filter];
         if (value?.length) {
             // when a single filter has multiple values, search ALL of them
@@ -286,22 +324,22 @@ async function buildMainFilterV2(search: SalesSearchOptions): Promise<void> {
 
     await addIncArrayFilter('owner', true);
 
-    if (args.collection_name.length) {
-        const collectionNames = args.collection_name
-            .filter((collectionName: string) => !args.collection_whitelist.length || args.collection_whitelist.includes(collectionName))
-            .filter((collectionName: string) => !args.collection_blacklist.includes(collectionName));
+    const collectionNames = [];
+    if (args.collection_name.length || args.collection_whitelist.length) {
+        collectionNames.push(
+            ...(
+                args.collection_name.length
+                    ? args.collection_name.filter((collectionName: string) => !args.collection_whitelist.length || args.collection_whitelist.includes(collectionName))
+                    : args.collection_whitelist
+            )
+                .filter((collectionName: string) => !args.collection_blacklist.includes(collectionName))
+        );
 
         if (!collectionNames.length) {
             collectionNames.push('\nDOES_NOT_EXIST\n');
         }
-
-        await addIncArrayFilter('collection_name', true, collectionNames);
-    } else {
-        await addIncArrayFilter('collection_name', true, args.collection_whitelist);
-
-        if (args.collection_blacklist.length) {
-            exc.collection_names.push(...args.collection_blacklist);
-        }
+    } else if (args.collection_blacklist.length) {
+        exc.collection_names.push(...args.collection_blacklist);
     }
 
     if (args.account.length) {
@@ -312,17 +350,24 @@ async function buildMainFilterV2(search: SalesSearchOptions): Promise<void> {
     await addIncArrayFilter('seller', true);
     await addIncArrayFilter('buyer', true);
 
-    await addIncArrayFilter('schema_name', true);
-
+    const templateIds = [];
     if (args.template_id.find((s: string) => s.toLowerCase() === 'null')) {
         inc.flags.push(SALE_FILTER_FLAG_NO_TEMPLATE);
     } else {
-        await addIncArrayFilter('template_id', true);
+        templateIds.push(...args.template_id);
     }
 
-    if (args.search?.length) {
-        await addIncArrayFilter('template_id', true, await getTemplateIDsForPartialName(args.search, search));
+    const schemaNames = [...args.schema_name];
+
+    if (args.search?.length || templateIds.length) {
+        await addIncArrayFilter('template_id', true, await getTemplateIDs(args.search, search, collectionNames, schemaNames, templateIds));
+        // we don't need to filter by collection or schema since template ids are unique
+        collectionNames.length = 0;
+        schemaNames.length = 0;
     }
+
+    await addIncArrayFilter('schema_name', true, schemaNames);
+    await addIncArrayFilter('collection_name', true, collectionNames);
 
     if (typeof args.burned === 'boolean') {
         if (args.burned) {
@@ -388,11 +433,11 @@ async function buildMainFilterV2(search: SalesSearchOptions): Promise<void> {
     }
 }
 
-function buildListingFilterV2(search: SalesSearchOptions): void {
+async function buildListingFilterV2(search: SalesSearchOptions): Promise<void> {
     const {values, query} = search;
-    const args = filterQueryArgs(values, {
+    const args = await filterQueryArgs(values, {
         show_seller_contracts: {type: 'bool', default: true},
-        contract_whitelist: {type: 'string[]', min: 1},
+        contract_whitelist: {type: 'list[name]'},
 
         maker_marketplace: {type: 'string[]', min: 1},
         taker_marketplace: {type: 'string[]', min: 1},
@@ -419,18 +464,7 @@ function buildListingFilterV2(search: SalesSearchOptions): void {
         }
     }
 
-    if (args.min_template_mint || args.max_template_mint) {
-        if (args.min_template_mint) {
-            query.addCondition('listing.template_mint != \'empty\'');
-        }
-
-        query.addCondition(
-            'listing.template_mint <@ int4range(' +
-            query.addVariable(args.min_template_mint ?? null) + ', ' +
-            query.addVariable(args.max_template_mint ?? null) +
-            ', \'[]\')'
-        );
-    }
+    await buildTemplateMintFilter(values, query);
 }
 
 function getDataFilters(search: SalesSearchOptions): string[] {
@@ -477,7 +511,7 @@ const getSaleCount = moize({
     isPromise: true,
     maxAge: 1000 * 60 * 60 * 24,
     maxArgs: 3,
-    maxSize: 500_000,
+    maxSize: 1_000_000,
 })(async (filter: string, value: string, saleState: number, search: SalesSearchOptions): Promise<number> => {
     const {rows} = await search.ctx.db.query(`
         SELECT COUNT(*)::INT ct
@@ -494,12 +528,13 @@ const getSaleCount = moize({
     return rows[0].ct;
 });
 
+const FILTERS_REQUIRING_COUNTING = ['collection_name', 'template_id', 'schema_name'];
 async function isStrongMainFilter(filter: string, values: string[], search: SalesSearchOptions): Promise<boolean> {
-    if (values.length >= 20) {
-        return false;
+    if (!FILTERS_REQUIRING_COUNTING.includes(filter)) {
+        return true;
     }
 
-    if (['collection_name', 'template_id', 'schema_name'].includes(filter)) {
+    const getTotalCount = async (): Promise<boolean> => {
         const saleStates = search.saleStates.length
             ? search.saleStates
             : [SaleApiState.LISTED, SaleApiState.SOLD];
@@ -514,27 +549,53 @@ async function isStrongMainFilter(filter: string, values: string[], search: Sale
                 }
             }
         }
-    }
 
-    return true;
+        return true;
+    };
+
+    const MAX_COUNT_TIME = 1_000;
+    return limitExecutionTime(getTotalCount(), MAX_COUNT_TIME, false);
 }
 
-async function getTemplateIDsForPartialName(name: string, search: SalesSearchOptions): Promise<number[]> {
-    const {rows} = await search.ctx.db.query(`
+async function limitExecutionTime<T extends Promise<any>>(promise: T, maxTime: number, timeoutResult: Awaited<T>): Promise<Awaited<T>> {
+    let timeoutId;
+    const timeLimiter: Promise<Awaited<T>> = new Promise(resolve => timeoutId = setTimeout(() => resolve(timeoutResult), maxTime));
+
+    const result = await Promise.race([promise, timeLimiter]);
+    clearTimeout(timeoutId);
+
+    return result;
+}
+
+async function getTemplateIDs(name: string | undefined, search: SalesSearchOptions, collectionNames: string[], schemaNames: string[], templateIds: string[]): Promise<number[]> {
+    const query = new QueryBuilder(`
         SELECT template_id
-        FROM atomicassets_templates
-        WHERE contract = $1
-            AND (immutable_data->>'name') %> $2
-     `, [search.ctx.coreArgs.atomicassets_account, name]);
+        FROM atomicassets_templates    
+    `);
+    query.equal('contract', search.ctx.coreArgs.atomicassets_account);
+    if (name !== undefined) {
+        query.addCondition(`(immutable_data->>'name') %> ${query.addVariable(name)}`);
+    }
+    if (collectionNames.length) {
+        query.equalMany('collection_name', collectionNames);
+    }
+    if (schemaNames.length) {
+        query.equalMany('schema_name', schemaNames);
+    }
+    if (templateIds.length) {
+        query.equalMany('template_id', templateIds);
+    }
+
+    const {rows} = await search.ctx.db.query(query.buildString(), query.buildValues());
 
     return rows.length ? rows.map(r => r.template_id) : [-1];
 }
 
 export async function getSalesTemplatesV2Action(params: RequestValues, ctx: AtomicMarketContext): Promise<any> {
     const maxLimit = ctx.coreArgs.limits?.sales_templates || 100;
-    const args = filterQueryArgs(params, {
+    const args = await filterQueryArgs(params, {
         symbol: {type: 'string', min: 1},
-        collection_whitelist: {type: 'string', min: 1},
+        collection_whitelist: {type: 'list[name]'},
 
         page: {type: 'int', min: 1, default: 1},
         limit: {type: 'int', min: 1, max: maxLimit, default: Math.min(maxLimit, 100)},
@@ -550,12 +611,12 @@ export async function getSalesTemplatesV2Action(params: RequestValues, ctx: Atom
         throw new ApiError('symbol parameter is required', 400);
     }
 
-    if (!hasAssetFilter(params) && !args.collection_whitelist) {
+    if (!hasAssetFilter(params) && !args.collection_whitelist.length) {
         throw new ApiError('You need to specify an asset filter!', 400);
     }
 
     const query = new QueryBuilder(`
-        SELECT DISTINCT ON (listing.assets_contract, template_id)
+        SELECT DISTINCT ON (template_id, listing.assets_contract)
             listing.market_contract, listing.sale_id, listing.assets_contract, SUBSTRING(u.f FROM 2)::BIGINT template_id, listing.price
         FROM atomicmarket_sales_filters listing
             JOIN LATERAL UNNEST(filter) u(f) ON u.f LIKE 't%'
@@ -574,7 +635,7 @@ export async function getSalesTemplatesV2Action(params: RequestValues, ctx: Atom
 
     await buildSaleFilterV2(search);
 
-    query.append('ORDER BY listing.assets_contract, template_id, listing.price');
+    query.append('ORDER BY template_id NULLS LAST, listing.assets_contract, listing.price, listing.sale_id DESC');
 
     const sortColumnMapping: {[key: string]: string} = {
         price: 't1.price',

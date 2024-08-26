@@ -11,14 +11,14 @@ import {filterQueryArgs} from '../../validation';
 
 export async function getAuctionsAction(params: RequestValues, ctx: AtomicMarketContext): Promise<any> {
     const maxLimit = ctx.coreArgs.limits?.auctions || 100;
-    const args = filterQueryArgs(params, {
+    const args = await filterQueryArgs(params, {
         page: {type: 'int', min: 1, default: 1},
         limit: {type: 'int', min: 1, max: maxLimit, default: Math.min(maxLimit, 100)},
         sort: {
             type: 'string',
             allowedValues: [
                 'created', 'updated', 'ending', 'auction_id', 'price',
-                'template_mint'
+                'template_mint', 'name',
             ],
             default: 'created'
         },
@@ -27,14 +27,22 @@ export async function getAuctionsAction(params: RequestValues, ctx: AtomicMarket
         count: {type: 'bool'}
     });
 
-    const query = new QueryBuilder(
-        'SELECT listing.auction_id ' +
-        'FROM atomicmarket_auctions listing ' +
-        'JOIN atomicmarket_tokens "token" ON (listing.market_contract = "token".market_contract AND listing.token_symbol = "token".token_symbol)'
-    );
+    const query = new QueryBuilder(`
+        SELECT listing.auction_id
+        FROM atomicmarket_auctions listing
+            JOIN atomicmarket_tokens "token" ON (listing.market_contract = "token".market_contract AND listing.token_symbol = "token".token_symbol)
+    `);
+
+    if (args.sort === 'name') {
+        query.appendToBase(`
+            LEFT OUTER JOIN atomicmarket_auctions_assets auction_asset ON auction_asset.auction_id = listing.auction_id AND auction_asset.market_contract = listing.market_contract AND auction_asset.index = 1
+            LEFT OUTER JOIN atomicassets_assets asset ON asset.asset_id = auction_asset.asset_id AND asset.contract = auction_asset.assets_contract
+            LEFT OUTER JOIN atomicassets_templates template ON template.contract = asset.contract AND template.template_id = asset.template_id
+        `);
+    }
 
     query.equal('listing.market_contract', ctx.coreArgs.atomicmarket_account);
-
+    // filter out auctions where an asset is missing
     query.addCondition(
         'NOT EXISTS (' +
         'SELECT * FROM atomicmarket_auctions_assets auction_asset ' +
@@ -43,9 +51,9 @@ export async function getAuctionsAction(params: RequestValues, ctx: AtomicMarket
         ')'
     );
 
-    buildAuctionFilter(params, query);
-    buildGreylistFilter(params, query, {collectionName: 'listing.collection_name'});
-    buildBoundaryFilter(
+    await buildAuctionFilter(params, query);
+    await buildGreylistFilter(params, query, {collectionName: 'listing.collection_name'});
+    await buildBoundaryFilter(
         params, query, 'listing.auction_id', 'int',
         args.sort === 'updated' ? 'listing.updated_at_time' : 'listing.created_at_time'
     );
@@ -64,8 +72,9 @@ export async function getAuctionsAction(params: RequestValues, ctx: AtomicMarket
         ending: {column: 'listing.end_time', nullable: false, numericIndex: true},
         created: {column: 'listing.created_at_time', nullable: false, numericIndex: true},
         updated: {column: 'listing.updated_at_time', nullable: false, numericIndex: true},
-        price: {column: 'listing.price', nullable: true, numericIndex: false},
-        template_mint: {column: 'LOWER(listing.template_mint)', nullable: true, numericIndex: false}
+        price: {column: 'listing.price', nullable: true, numericIndex: true},
+        template_mint: {column: 'LOWER(listing.template_mint)', nullable: true, numericIndex: true},
+        name: {column: `(COALESCE(asset.mutable_data, '{}') || COALESCE(asset.immutable_data, '{}') || COALESCE(template.immutable_data, '{}'))->>'name'`, nullable: true, numericIndex: false},
     };
 
     const ignoreIndex = (hasAssetFilter(params) || hasDataFilters(params) || hasListingFilter(params)) && sortMapping[args.sort].numericIndex;
@@ -98,9 +107,13 @@ export async function getAuctionsCountAction(params: RequestValues, ctx: AtomicM
 }
 
 export async function getAuctionAction(params: RequestValues, ctx: AtomicMarketContext): Promise<any> {
+    const args = await filterQueryArgs(ctx.pathParams, {
+        auction_id: {type: 'id'},
+    });
+
     const query = await ctx.db.query(
         'SELECT * FROM atomicmarket_auctions_master WHERE market_contract = $1 AND auction_id = $2',
-        [ctx.coreArgs.atomicmarket_account, ctx.pathParams.auction_id]
+        [ctx.coreArgs.atomicmarket_account, args.auction_id]
     );
 
     if (query.rowCount === 0) {
@@ -115,16 +128,19 @@ export async function getAuctionAction(params: RequestValues, ctx: AtomicMarketC
 
 export async function getAuctionLogsAction(params: RequestValues, ctx: AtomicMarketContext): Promise<any> {
     const maxLimit = ctx.coreArgs.limits?.logs || 100;
-    const args = filterQueryArgs(params, {
+    const args = await filterQueryArgs({...ctx.pathParams, ...params}, {
+        auction_id: {type: 'id'},
         page: {type: 'int', min: 1, default: 1},
         limit: {type: 'int', min: 1, max: maxLimit, default: Math.min(maxLimit, 100)},
-        order: {type: 'string', allowedValues: ['asc', 'desc'], default: 'asc'}
+        order: {type: 'string', allowedValues: ['asc', 'desc'], default: 'asc'},
+        action_whitelist: {type: 'string[]', min: 1},
+        action_blacklist: {type: 'string[]', min: 1},
     });
 
     return await getContractActionLogs(
         ctx.db, ctx.coreArgs.atomicmarket_account,
         applyActionGreylistFilters(['lognewauct', 'logauctstart', 'cancelauct', 'auctclaimbuy', 'auctclaimsel'], args),
-        {auction_id: ctx.pathParams.auction_id},
+        {auction_id: args.auction_id},
         (args.page - 1) * args.limit, args.limit, args.order
     );
 }

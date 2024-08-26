@@ -8,8 +8,8 @@ import {
     actionGreylistParameters,
     dateBoundaryParameters,
     getOpenAPI3Responses,
+    getPrimaryBoundaryParams,
     paginationParameters,
-    primaryBoundaryParameters
 } from '../../../docs';
 import { extendedAssetFilterParameters, atomicDataFilter, baseAssetFilterParameters } from '../../atomicassets/openapi';
 import { listingFilterParameters } from '../openapi';
@@ -64,7 +64,7 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
                         ...listingFilterParameters,
                         ...baseAssetFilterParameters,
                         ...extendedAssetFilterParameters,
-                        ...primaryBoundaryParameters,
+                        ...getPrimaryBoundaryParams('buyoffer_id'),
                         ...dateBoundaryParameters,
                         ...paginationParameters,
                         {
@@ -76,7 +76,7 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
                                 type: 'string',
                                 enum: [
                                     'created', 'updated', 'buyoffer_id', 'price',
-                                    'template_mint'
+                                    'template_mint', 'name',
                                 ],
                                 default: 'created'
                             }

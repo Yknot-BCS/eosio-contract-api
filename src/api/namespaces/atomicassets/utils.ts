@@ -1,6 +1,8 @@
 import {OfferState} from '../../../filler/handlers/atomicassets';
 import QueryBuilder from '../../builder';
 import {filterQueryArgs, FiltersDefinition, FilterValues} from '../validation';
+import moize from 'moize';
+import { AtomicAssetsContext } from './index';
 
 export function hasAssetFilter(values: FilterValues, blacklist: string[] = []): boolean {
     return Object.keys(values)
@@ -8,11 +10,62 @@ export function hasAssetFilter(values: FilterValues, blacklist: string[] = []): 
         .some(key => assetFilters[key]);
 }
 
+export async function hasStrongAssetFilter(values: FilterValues, ctx: AtomicAssetsContext): Promise<boolean> {
+
+    if (await hasStrongCollectionSchemaFilter(values.collection_name || [], values.schema_name || [], ctx)) {
+        return true;
+    }
+
+    return hasAssetFilter(values, ['collection_name', 'schema_name', 'burned', 'is_transferable', 'is_burnable']);
+}
+
+const strongCollectionSchemaFilterLimit = 75_000;
+async function hasStrongCollectionSchemaFilter(collection_names: string[], schema_names: string[], ctx: AtomicAssetsContext): Promise<boolean> {
+    if (!collection_names.length) {
+        return false;
+    }
+
+    let count = 0;
+
+    if (!schema_names.length) {
+        schema_names = [null];
+    }
+
+    for (const collectionName of collection_names) {
+        for (const schemaName of (schema_names ?? [null])) {
+            count += await getSchemaAssetCount(collectionName, schemaName, ctx);
+
+            if (count > strongCollectionSchemaFilterLimit) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+const getSchemaAssetCount = moize({
+    isPromise: true,
+    maxAge: 1000 * 60 * 60 * 24,
+    maxArgs: 2,
+    maxSize: 1_000_000,
+})(async (collection_name: string, schema_name: string | null, ctx: AtomicAssetsContext): Promise<number> => {
+    const {ct} = await ctx.db.fetchOne(`
+        SELECT SUM(owned)::INT ct
+        FROM atomicassets_asset_counts
+        WHERE contract = $1 
+            AND (collection_name = $2)
+            AND (schema_name = $3 OR $3 IS NULL)
+    `, [ctx.coreArgs.atomicassets_account, collection_name, schema_name]);
+
+    return ct;
+});
+
 export function hasDataFilters(values: FilterValues): boolean {
     const keys = Object.keys(values);
 
     for (const key of keys) {
-        if (['match', 'match_immutable_name', 'match_mutable_name'].includes(key)) {
+        if (['match', 'match_immutable_name', 'match_mutable_name', 'search'].includes(key)) {
             return true;
         }
 
@@ -66,6 +119,17 @@ export function buildDataConditions(values: FilterValues, query: QueryBuilder, o
     }
 
     if (options.assetTable) {
+        const assetDataCondition = {
+            ...mutableCondition,
+            ...immutableCondition,
+        };
+
+        if (Object.keys(assetDataCondition).length > 0) {
+            // use combined index
+            query.addCondition(`(${options.assetTable}.mutable_data || ${options.assetTable}.immutable_data) @> ${query.addVariable(JSON.stringify(mutableCondition))}::jsonb`);
+            query.addCondition(`(${options.assetTable}.mutable_data || ${options.assetTable}.immutable_data) != '{}'`);
+        }
+
         if (Object.keys(mutableCondition).length > 0) {
             query.addCondition(options.assetTable + '.mutable_data @> ' + query.addVariable(JSON.stringify(mutableCondition)) + '::jsonb');
         }
@@ -76,17 +140,15 @@ export function buildDataConditions(values: FilterValues, query: QueryBuilder, o
 
         if (typeof values.match_immutable_name === 'string' && values.match_immutable_name.length > 0) {
             query.addCondition(
-                options.assetTable + '.immutable_data->>\'name\' IS NOT NULL AND ' +
                 options.assetTable + '.immutable_data->>\'name\' ILIKE ' +
-                query.addVariable('%' + values.match_immutable_name.replace('%', '\\%').replace('_', '\\_') + '%')
+                query.addVariable('%' + query.escapeLikeVariable(values.match_immutable_name) + '%')
             );
         }
 
         if (typeof values.match_mutable_name === 'string' && values.match_mutable_name.length > 0) {
             query.addCondition(
-                options.assetTable + '.mutable_data->>\'name\' IS NOT NULL AND ' +
                 options.assetTable + '.mutable_data->>\'name\' ILIKE ' +
-                query.addVariable('%' + values.match_mutable_name.replace('%', '\\%').replace('_', '\\_') + '%')
+                query.addVariable('%' + query.escapeLikeVariable(values.match_mutable_name) + '%')
             );
         }
     }
@@ -98,75 +160,92 @@ export function buildDataConditions(values: FilterValues, query: QueryBuilder, o
 
         if (typeof values.match === 'string' && values.match.length > 0) {
             query.addCondition(
-                options.templateTable + '.immutable_data->>\'name\' IS NOT NULL AND ' +
                 options.templateTable + '.immutable_data->>\'name\' ILIKE ' +
-                query.addVariable('%' + values.match.replace('%', '\\%').replace('_', '\\_') + '%')
+                query.addVariable('%' + query.escapeLikeVariable(values.match) + '%')
             );
         }
 
         if (typeof values.search === 'string' && values.search.length > 0) {
             query.addCondition(
-                `${options.templateTable}.immutable_data->>'name' IS NOT NULL AND 
-                ${query.addVariable(values.search)} <% (${options.templateTable}.immutable_data->>'name')`
+                `${query.addVariable(values.search)} <% (${options.templateTable}.immutable_data->>'name')`
             );
         }
     }
 }
 
 const assetFilters: FiltersDefinition = {
-    asset_id: {type: 'string', min: 1},
-    owner: {type: 'string', min: 1},
+    asset_id: {type: 'list[id]'},
+    owner: {type: 'list[name]'},
     burned: {type: 'bool'},
-    template_id: {type: 'string', min: 1},
-    collection_name: {type: 'string', min: 1},
-    schema_name: {type: 'string', min: 1},
+    template_id: {type: 'list[id]'},
+    collection_name: {type: 'list[name]'},
+    schema_name: {type: 'list[name]'},
     is_transferable: {type: 'bool'},
     is_burnable: {type: 'bool'},
-    minter: {type: 'name[]'}
+    minter: {type: 'list[name]'},
+    initial_receiver: {type: 'list[name]'},
+    burner: {type: 'list[name]'},
 };
 
-export function buildAssetFilter(
+export async function buildAssetFilter(
     values: FilterValues, query: QueryBuilder,
     options: { assetTable?: string, templateTable?: string, allowDataFilter?: boolean } = {}
-): void {
+): Promise<void> {
     options = {allowDataFilter: true, ...options};
 
-    const args = filterQueryArgs(values, assetFilters);
+    const args = await filterQueryArgs(values, assetFilters);
 
     if (options.allowDataFilter !== false) {
         buildDataConditions(values, query, {assetTable: options.assetTable, templateTable: options.templateTable});
     }
 
-    if (args.asset_id) {
-        query.equalMany(options.assetTable + '.asset_id', args.asset_id.split(','));
+    if (args.asset_id.length) {
+        query.equalMany(options.assetTable + '.asset_id', args.asset_id);
     }
 
-    if (args.owner) {
-        query.equalMany(options.assetTable + '.owner', args.owner.split(','));
+    if (args.owner.length) {
+        query.equalMany(options.assetTable + '.owner', args.owner);
     }
 
-    if (args.template_id && args.template_id.toLowerCase() !== 'null') {
-        query.equalMany(options.assetTable + '.template_id', args.template_id.split(','));
+    if (args.template_id.length) {
+        if ((args.template_id.length === 1) && (args.template_id[0] === 'null')) {
+            query.isNull(options.assetTable + '.template_id');
+        } else {
+            query.equalMany(options.assetTable + '.template_id', args.template_id);
+        }
     }
 
-    if (args.template_id && args.template_id.toLowerCase() === 'null') {
-        query.isNull(options.assetTable + '.template_id');
+    if (args.collection_name.length) {
+        query.equalMany(options.assetTable + '.collection_name', args.collection_name);
     }
 
-    if (args.collection_name) {
-        query.equalMany(options.assetTable + '.collection_name', args.collection_name.split(','));
+    if (args.schema_name.length) {
+        query.equalMany(options.assetTable + '.schema_name', args.schema_name);
+
+        if (!args.collection_name.length) {
+            // makes collection/schema index faster to use
+            query.addCondition(`${options.assetTable}.collection_name IN (SELECT collection_name FROM atomicassets_schemas WHERE schema_name = ANY(${query.addVariable(args.schema_name)}))`);
+        }
     }
 
-    if (args.schema_name) {
-        query.equalMany(options.assetTable + '.schema_name', args.schema_name.split(','));
-    }
-
-    if (args.minter && args.minter.length > 0) {
+    if (args.minter.length) {
         query.addCondition(`EXISTS (
             SELECT * FROM atomicassets_mints mint_table 
             WHERE ${options.assetTable}.contract = mint_table.contract AND ${options.assetTable}.asset_id = mint_table.asset_id
                 AND mint_table.minter = ANY(${query.addVariable(args.minter)})
         )`);
+    }
+
+    if (args.initial_receiver.length) {
+        query.addCondition(`EXISTS (
+            SELECT * FROM atomicassets_mints mint_table 
+            WHERE ${options.assetTable}.contract = mint_table.contract AND ${options.assetTable}.asset_id = mint_table.asset_id
+                AND mint_table.receiver = ANY(${query.addVariable(args.initial_receiver)})
+        )`);
+    }
+
+    if (args.burner.length) {
+        query.equalMany(options.assetTable + '.burned_by_account', args.burner);
     }
 
     if (typeof args.burned === 'boolean') {
@@ -194,61 +273,40 @@ export function buildAssetFilter(
     }
 }
 
-export function buildGreylistFilter(values: FilterValues, query: QueryBuilder, columns: { collectionName?: string, account?: string[] }): void {
-    const args = filterQueryArgs(values, {
-        collection_blacklist: {type: 'string', min: 1},
-        collection_whitelist: {type: 'string', min: 1},
-        account_blacklist: {type: 'string', min: 1}
+export async function buildGreylistFilter(values: FilterValues, query: QueryBuilder, columns: { collectionName?: string, account?: string[] }): Promise<void> {
+    const args = await filterQueryArgs(values, {
+        collection_blacklist: {type: 'list[name]'},
+        collection_whitelist: {type: 'list[name]'},
+        account_blacklist: {type: 'list[name]'},
     });
 
-    let collectionBlacklist: string[] = [];
-    let collectionWhitelist: string[] = [];
-
-    if (args.collection_blacklist) {
-        collectionBlacklist = args.collection_blacklist.split(',');
-    }
-
-    if (args.collection_whitelist) {
-        collectionWhitelist = args.collection_whitelist.split(',');
-    }
+    const collectionBlacklist: string[] = args.collection_blacklist;
+    const collectionWhitelist: string[] = args.collection_whitelist;
 
     if (columns.collectionName) {
         if (collectionWhitelist.length > 0 && collectionBlacklist.length > 0) {
-            query.addCondition(
-                'EXISTS (SELECT * FROM UNNEST(' + query.addVariable(collectionWhitelist.filter(row => !collectionBlacklist.includes(row))) + '::text[]) ' +
-                'WHERE "unnest" = ' + columns.collectionName + ')'
-            );
+            query.equalMany(columns.collectionName, collectionWhitelist.filter(row => !collectionBlacklist.includes(row)));
         } else {
             if (collectionWhitelist.length > 0) {
-                query.addCondition(
-                    'EXISTS (SELECT * FROM UNNEST(' + query.addVariable(collectionWhitelist) + '::text[]) ' +
-                    'WHERE "unnest" = ' + columns.collectionName + ')'
-                );
+                query.equalMany(columns.collectionName, collectionWhitelist);
             }
 
             if (collectionBlacklist.length > 0) {
-                query.addCondition(
-                    'NOT EXISTS (SELECT * FROM UNNEST(' + query.addVariable(collectionBlacklist) + '::text[]) ' +
-                    'WHERE "unnest" = ' + columns.collectionName + ')'
-                );
+                query.notMany(columns.collectionName, collectionBlacklist);
             }
         }
     }
 
-    if (columns.account?.length > 0 && args.account_blacklist) {
-        const accounts = args.account_blacklist.split(',');
-
-        if (accounts.length > 0) {
-            query.addCondition(
-                'AND NOT EXISTS (SELECT * FROM UNNEST(' + query.addVariable(accounts) + '::text[]) ' +
-                'WHERE ' + columns.account.map(column => ('"unnest" = ' + column)).join(' OR ') + ') '
-            );
-        }
+    if (columns.account?.length && args.account_blacklist.length) {
+        query.addCondition(
+            'AND NOT EXISTS (SELECT * FROM UNNEST(' + query.addVariable(args.account_blacklist) + '::text[]) ' +
+            'WHERE ' + columns.account.map(column => ('"unnest" = ' + column)).join(' OR ') + ') '
+        );
     }
 }
 
-export function buildHideOffersFilter(values: FilterValues, query: QueryBuilder, assetTable: string): void {
-    const args = filterQueryArgs(values, {
+export async function buildHideOffersFilter(values: FilterValues, query: QueryBuilder, assetTable: string): Promise<void> {
+    const args = await filterQueryArgs(values, {
         hide_offers: {type: 'bool', default: false}
     });
 

@@ -36,7 +36,7 @@ export default class PostgresConnection {
         exitHook((callback: () => void) => this.pool.end(callback));
     }
 
-    createPool(args: any): Pool {
+    createPool(args: Partial<PoolConfig>): Pool {
         return new Pool({
             ...this.args, ...args
         });
@@ -46,6 +46,12 @@ export default class PostgresConnection {
         await this.connect();
 
         return await this.pool.query(queryText, values);
+    }
+
+    async fetchOne<T = any>(queryText: string, values: any[] = []): Promise<T> {
+        const {rows} = await this.query(queryText, values);
+
+        return rows[0];
     }
 
     async begin(): Promise<PoolClient> {

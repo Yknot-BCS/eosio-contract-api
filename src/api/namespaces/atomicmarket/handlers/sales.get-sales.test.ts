@@ -394,11 +394,11 @@ describe('AtomicMarket Sales API', () => {
             const offer1 = await client.createOfferAsset();
             await client.createSale({offer_id: offer1.offer_id});
 
-            const {schema_name} = await client.createSchema();
-            const {offer_id} = await client.createOfferAsset({}, {schema_name});
+            const {schema_name, collection_name} = await client.createSchema();
+            const {offer_id} = await client.createOfferAsset({}, {schema_name, collection_name});
             const {sale_id} = await client.createSale({offer_id});
 
-            expect(await getSalesIds({schema_name: `${schema_name},-1`}))
+            expect(await getSalesIds({schema_name: `${schema_name},z`}))
                 .to.deep.equal([sale_id]);
         });
 
@@ -674,6 +674,24 @@ describe('AtomicMarket Sales API', () => {
 
             expect(await getSalesIds({sort: 'template_mint'}))
                 .to.deep.equal([sale_id1, sale_id2]);
+        });
+
+        txit('orders by template_mint', async () => {
+            const {sale_id: sale_id1} = await client.createFullSale({}, {
+                mutable_data: JSON.stringify({name: 'b'}),
+            });
+
+            const {sale_id: sale_id2} = await client.createFullSale({}, {
+                immutable_data: JSON.stringify({name: 'a'}),
+            });
+            const {sale_id: sale_id3} = await client.createFullSale({}, {
+                template_id: (await client.createTemplate({
+                    immutable_data: {name: 'e'},
+                })).template_id,
+            });
+
+            expect(await getSalesIds({sort: 'name', order: 'asc'}))
+                .to.deep.equal([sale_id2, sale_id1, sale_id3]);
         });
 
         txit('paginates', async () => {

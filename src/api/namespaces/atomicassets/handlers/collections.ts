@@ -9,17 +9,17 @@ import { filterQueryArgs } from '../../validation';
 
 export async function getCollectionsAction(params: RequestValues, ctx: AtomicAssetsContext): Promise<any> {
     const maxLimit = ctx.coreArgs.limits?.collections || 1000;
-    const args = filterQueryArgs(params, {
+    const args = await filterQueryArgs(params, {
         page: {type: 'int', min: 1, default: 1},
         limit: {type: 'int', min: 1, max: maxLimit, default: Math.min(maxLimit, 100)},
         sort: {type: 'string', allowedValues: ['created', 'collection_name'], default: 'created'},
         order: {type: 'string', allowedValues: ['asc', 'desc'], default: 'desc'},
 
-        author: {type: 'string', min: 1, max: 12},
-        authorized_account: {type: 'string', min: 1, max: 12},
-        notify_account: {type: 'string', min: 1, max: 12},
+        author: {type: 'list[name]'},
+        authorized_account: {type: 'name'},
+        notify_account: {type: 'name'},
 
-        match: {type: 'string', min: 1},
+        match: {type: 'name'},
         search: {type: 'string', min: 1},
 
         count: {type: 'bool'}
@@ -29,8 +29,8 @@ export async function getCollectionsAction(params: RequestValues, ctx: AtomicAss
 
     query.equal('contract', ctx.coreArgs.atomicassets_account);
 
-    if (args.author) {
-        query.equalMany('author', args.author.split(','));
+    if (args.author.length) {
+        query.equalMany('author', args.author);
     }
 
     if (args.authorized_account) {
@@ -49,8 +49,8 @@ export async function getCollectionsAction(params: RequestValues, ctx: AtomicAss
         query.addCondition(`${query.addVariable(args.search)} <% (collection.collection_name || ' ' || COALESCE(collection.data->>'name', ''))`);
     }
 
-    buildBoundaryFilter(params, query, 'collection.collection_name', 'string', 'collection.created_at_time');
-    buildGreylistFilter(params, query, {collectionName: 'collection.collection_name'});
+    await buildBoundaryFilter(params, query, 'collection.collection_name', 'string', 'collection.created_at_time');
+    await buildGreylistFilter(params, query, {collectionName: 'collection.collection_name'});
 
     if (args.count) {
         const countQuery = await ctx.db.query(
@@ -108,16 +108,16 @@ export async function getCollectionStatsAction(params: RequestValues, ctx: Atomi
             SELECT
                 template_id,
                 schema_name,
-                COUNT(*) total,
-                COUNT(*) FILTER (WHERE owner IS NULL) burned
-            FROM atomicassets_assets
+                SUM(assets) assets,
+                SUM(burned) burned
+            FROM atomicassets_asset_counts
             WHERE contract = $1
                 AND collection_name = $2
             GROUP BY template_id, schema_name
         )
         
         SELECT
-            (SELECT SUM(total) FROM assets) assets,
+            (SELECT SUM(assets) FROM assets) assets,
             (SELECT SUM(burned) FROM assets) burned,
             ARRAY(SELECT jsonb_build_object('template_id', template_id, 'burned', SUM(burned)) FROM assets GROUP BY template_id HAVING SUM(burned) > 0) burned_by_template,
             ARRAY(SELECT jsonb_build_object('schema_name', schema_name, 'burned', SUM(burned)) FROM assets GROUP BY schema_name HAVING SUM(burned) > 0) burned_by_schema,
@@ -131,12 +131,12 @@ export async function getCollectionStatsAction(params: RequestValues, ctx: Atomi
 
 export async function getCollectionSchemasAction(params: RequestValues, ctx: AtomicAssetsContext): Promise<any> {
     const query = await ctx.db.query(
-        `SELECT schema_name FROM atomicassets_schemas "schema"
-                WHERE contract = $1 AND collection_name = $2 AND EXISTS (
-                    SELECT * FROM atomicassets_assets asset 
-                    WHERE asset.contract = "schema".contract AND asset.collection_name = "schema".collection_name AND 
-                        asset.schema_name = "schema".schema_name AND "owner" IS NOT NULL
-                )`,
+        `
+        SELECT schema_name FROM atomicassets_asset_counts
+        WHERE contract = $1 AND collection_name = $2
+        GROUP BY schema_name
+        HAVING SUM(owned) > 0
+        `,
         [ctx.coreArgs.atomicassets_account, ctx.pathParams.collection_name]
     );
 
@@ -145,10 +145,12 @@ export async function getCollectionSchemasAction(params: RequestValues, ctx: Ato
 
 export async function getCollectionLogsAction(params: RequestValues, ctx: AtomicAssetsContext): Promise<any> {
     const maxLimit = ctx.coreArgs.limits?.logs || 100;
-    const args = filterQueryArgs(params, {
+    const args = await filterQueryArgs(params, {
         page: {type: 'int', min: 1, default: 1},
         limit: {type: 'int', min: 1, max: maxLimit, default: Math.min(maxLimit, 100)},
-        order: {type: 'string', allowedValues: ['asc', 'desc'], default: 'asc'}
+        order: {type: 'string', allowedValues: ['asc', 'desc'], default: 'asc'},
+        action_whitelist: {type: 'string[]', min: 1},
+        action_blacklist: {type: 'string[]', min: 1},
     });
 
     return await getContractActionLogs(
