@@ -301,4 +301,4 @@ or installing them directly into your computer.
 
 ### Running in production
 
-`docker-compose -f docker-compose.prod.yml up -d`
+`docker compose -f docker-compose.prod.yml up -d`

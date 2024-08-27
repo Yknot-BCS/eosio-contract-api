@@ -1,8 +1,8 @@
-version: '3.0'
+version: "3.0"
 services:
   # New relic agent
   agent:
-    container_name: newrelic-infra-atomic-telostest
+    container_name: newrelic-infra-atomic-telos-bp
     image: newrelic/infrastructure:latest
     cap_add:
       - SYS_PTRACE
@@ -15,39 +15,39 @@ services:
     environment:
       NRIA_LICENSE_KEY: ${NEW_RELIC_LICENSE_KEY}
     restart: unless-stopped
-  
-  nginx:
-    container_name: nginx
-    image: nginxproxy/nginx-proxy
-    restart: unless-stopped
-    ports:
-      - 80:80
-      - 443:443
-    volumes:
-      - /var/run/docker.sock:/tmp/docker.sock:ro
-      - /var/docker/nginx/html:/usr/share/nginx/html
-      - /var/docker/nginx/certs:/etc/nginx/certs
-      - /var/docker/nginx/vhost:/etc/nginx/vhost.d
-    logging:
-      options:
-        max-size: "10m"
-        max-file: "3"
-    networks:
-      - eosio-contract-api
 
-  letsencrypt-companion:
-    container_name: letsencrypt-companion
-    image: nginxproxy/acme-companion
-    restart: unless-stopped
-    volumes_from:
-      - nginx
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/docker/nginx/acme:/etc/acme.sh
-    environment:
-      DEFAULT_EMAIL: dev@y-knot.io
-    networks:
-      - eosio-contract-api
+  # nginx:
+  #   container_name: nginx
+  #   image: nginxproxy/nginx-proxy
+  #   restart: unless-stopped
+  #   ports:
+  #     - 80:80
+  #     - 443:443
+  #   volumes:
+  #     - /var/run/docker.sock:/tmp/docker.sock:ro
+  #     - /var/docker/nginx/html:/usr/share/nginx/html
+  #     - /var/docker/nginx/certs:/etc/nginx/certs
+  #     - /var/docker/nginx/vhost:/etc/nginx/vhost.d
+  #   logging:
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
+  #   networks:
+  #     - eosio-contract-api
+
+  # letsencrypt-companion:
+  #   container_name: letsencrypt-companion
+  #   image: nginxproxy/acme-companion
+  #   restart: unless-stopped
+  #   volumes_from:
+  #     - nginx
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #     - /var/docker/nginx/acme:/etc/acme.sh
+  #   environment:
+  #     DEFAULT_EMAIL: dev@y-knot.io
+  #   networks:
+  #     - eosio-contract-api
 
   eosio-contract-api-filler:
     container_name: eosio-contract-api-filler
@@ -68,6 +68,10 @@ services:
     restart: on-failure
     expose:
       - 9000
+      - 9010
+    ports:
+      - "9000:9000"
+      - "9010:9010"
     depends_on:
       - eosio-contract-api-postgres
       - eosio-contract-api-redis
@@ -76,7 +80,7 @@ services:
     networks:
       - eosio-contract-api
     environment:
-      NEW_RELIC_APP_NAME: atomic-telostest-server
+      NEW_RELIC_APP_NAME: atomic-telos-server-bp
       VIRTUAL_HOST: atomic-telostest.y-knot.io
       LETSENCRYPT_HOST: atomic-telostest.y-knot.io
     env_file:
@@ -95,20 +99,63 @@ services:
     container_name: eosio-contract-api-postgres
     image: postgres:13
     restart: on-failure
-    shm_size: '8gb'
+    shm_size: "8gb"
     environment:
-      - 'POSTGRES_USER=root'
-      - 'POSTGRES_PASSWORD=changeme'
+      - "POSTGRES_USER=root"
+      - "POSTGRES_PASSWORD=changeme"
     # ports:
     #   - "5432:5432"
     volumes:
       - ./docker/postgres/data:/var/lib/postgresql/data
     networks:
       - eosio-contract-api
+
+  # Optional For inspecting the DB
+  pgadmin:
+    container_name: pgadmin
+    image: dpage/pgadmin4
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    networks:
+      - eosio-contract-api
+
+  # Optional For inspecting metrics
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    ports:
+      - "9090:9090"
+    networks:
+      - eosio-contract-api
+
+  # Optional. For Visualizing metrics
+  grafana:
+    image: grafana/grafana:8.2.2
+    ports:
+      - "3000:3000"
+    volumes:
+      - "grafana-storage:/var/lib/grafana"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+    networks:
+      - eosio-contract-api
+
+volumes:
+  grafana-storage:
+
 networks:
   eosio-contract-api:
     driver: bridge
     ipam:
-     config:
-       - subnet: 172.18.0.0/16
-         gateway: 172.18.0.1
+      config:
+        - subnet: 172.18.0.0/16
+          gateway: 172.18.0.1

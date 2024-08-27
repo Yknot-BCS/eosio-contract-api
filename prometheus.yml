@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 1m
+
+scrape_configs:
+  - job_name: "eos-contract-api"
+    static_configs:
+      - targets: ["172.18.0.6:9010"]
+
+remote_write:
+  - url: https://metric-api.eu.newrelic.com/prometheus/v1/write?prometheus_server=atomic-mainnet-yknot
+    authorization:
+      credentials: eu01xx***
