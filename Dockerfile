@@ -1,20 +1,24 @@
 FROM node:16-alpine
 
-RUN adduser --disabled-password application && \
-  mkdir -p /home/application/app/ && \
-  chown -R application:application /home/application
+# Create application user first
+RUN adduser --disabled-password application
 
-USER application
-
+# Set working directory
 WORKDIR /home/application/app
 
-COPY yarn.lock .
-COPY package.json .
+# Copy package files first
+COPY package.json yarn.lock ./
 
-RUN yarn install --ignore-scripts
-
+# Copy the rest of the application
 COPY . .
 
+# Set correct permissions for the entire app directory
+RUN chown -R application:application /home/application/app
+
+# Switch to application user
+USER application
+
+# Install dependencies
 RUN yarn install
 
 ENV NODE_ENV production
